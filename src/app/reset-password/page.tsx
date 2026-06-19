@@ -4,6 +4,34 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
+type Tokens = { access_token: string; refresh_token: string };
+
+function tokensOf(s: Tokens): Tokens {
+  return { access_token: s.access_token, refresh_token: s.refresh_token };
+}
+
+function projectRef(url?: string): string | null {
+  try {
+    return url ? new URL(url).hostname.split(".")[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Decode the `sub` (user id) from a JWT access token without verifying it —
+// purely for diagnostics/comparison.
+function decodeJwtSub(token?: string): string | null {
+  if (!token) return null;
+  try {
+    let b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    b64 += "=".repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(b64));
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function ResetPasswordPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -13,18 +41,17 @@ export default function ResetPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
-  // Holds the tokens from the recovery session so we can re-attach them to the
-  // client right before updateUser if the in-memory session got lost.
-  const recoveryRef = useRef<{ access_token: string; refresh_token: string } | null>(null);
+  // Tokens from the recovery session, used to re-attach if the in-memory
+  // session is lost before updateUser.
+  const recoveryRef = useRef<Tokens | null>(null);
 
-  // Establish the recovery session. With the standard client, detectSessionInUrl
-  // may auto-exchange the ?code= during init, so we (a) accept an already-present
-  // session, (b) otherwise exchange the code exactly once, and (c) on any
-  // exchange error, re-check for a session — the auto-exchange may have already
-  // succeeded. We never time out before the exchange resolves, and we do not
-  // rely on PASSWORD_RECOVERY events.
+  // Establish the recovery session. When a ?code= is present it is the
+  // AUTHORITATIVE source — we exchange it (or read the result of the client's
+  // auto-exchange) rather than trusting any pre-existing session, which could
+  // be stale or from a different project. Exactly one explicit exchange; no
+  // timeout; no reliance on PASSWORD_RECOVERY events.
   useEffect(() => {
-    if (startedRef.current) return; // exactly once (guards StrictMode double-invoke)
+    if (startedRef.current) return; // guards StrictMode double-invoke
     startedRef.current = true;
 
     let active = true;
@@ -39,40 +66,23 @@ export default function ResetPasswordPage() {
       }
       const code = params.get("code");
 
-      // (a) A session may already exist if the client auto-exchanged the code.
-      const { data: existing } = await supabase.auth.getSession();
-      if (!active) return;
-      if (existing.session) {
-        recoveryRef.current = {
-          access_token: existing.session.access_token,
-          refresh_token: existing.session.refresh_token,
-        };
-        window.history.replaceState({}, "", "/reset-password");
-        setStatus("ready");
-        return;
-      }
-
-      if (!code) {
-        setStatus("invalid");
-        return;
-      }
-
-      // (b) Exchange the code exactly once.
-      const { data, error } = await supabase.auth.exchangeCodeForSession(code);
-      if (!active) return;
-
-      if (error) {
-        // Log the exact error object for diagnosis.
-        console.error("[reset-password] exchangeCodeForSession error:", error);
-        // (c) The auto-exchange may have already consumed the code and created
-        // the session; treat an existing session as success.
+      if (code) {
+        const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+        if (!active) return;
+        if (!error && data.session) {
+          recoveryRef.current = tokensOf(data.session);
+          window.history.replaceState({}, "", "/reset-password");
+          setStatus("ready");
+          return;
+        }
+        if (error) {
+          console.error("[reset-password] exchangeCodeForSession error:", error);
+        }
+        // The client may have auto-exchanged the code already; read that session.
         const { data: after } = await supabase.auth.getSession();
         if (!active) return;
         if (after.session) {
-          recoveryRef.current = {
-            access_token: after.session.access_token,
-            refresh_token: after.session.refresh_token,
-          };
+          recoveryRef.current = tokensOf(after.session);
           window.history.replaceState({}, "", "/reset-password");
           setStatus("ready");
           return;
@@ -81,14 +91,17 @@ export default function ResetPasswordPage() {
         return;
       }
 
-      if (data.session) {
-        recoveryRef.current = {
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,
-        };
+      // No code in the URL: only then fall back to an existing session
+      // (e.g. the user refreshed after a successful exchange).
+      const { data: existing } = await supabase.auth.getSession();
+      if (!active) return;
+      if (existing.session) {
+        recoveryRef.current = tokensOf(existing.session);
+        window.history.replaceState({}, "", "/reset-password");
+        setStatus("ready");
+        return;
       }
-      window.history.replaceState({}, "", "/reset-password");
-      setStatus("ready");
+      setStatus("invalid");
     })();
 
     return () => {
@@ -108,31 +121,92 @@ export default function ResetPasswordPage() {
     }
     setBusy(true);
 
-    // The 403 on PUT /auth/v1/user happens when updateUser runs without a valid
-    // session bound to this client. Verify an access_token is present; if the
-    // in-memory session was lost, re-attach the recovery tokens via setSession.
+    // Make sure a session is attached to THIS client; re-attach the recovery
+    // tokens if the in-memory session was lost.
     const { data: sessionData } = await supabase.auth.getSession();
     let session = sessionData.session;
-
     if (!session?.access_token && recoveryRef.current) {
       const { data: setData, error: setErr } = await supabase.auth.setSession(
         recoveryRef.current
       );
-      if (setErr) {
-        console.error("[reset-password] setSession error:", setErr);
-      }
+      if (setErr) console.error("[reset-password] setSession error:", setErr);
       session = setData?.session ?? null;
     }
-
     if (!session?.access_token) {
       setError("Your recovery session has expired. Please request a new reset link.");
       setBusy(false);
       return;
     }
 
+    // ---- Diagnostics: confirm we are not mixing projects / stale sessions ----
+    const projectUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const ref = projectRef(projectUrl);
+    console.log("[reset-password] project URL:", projectUrl, "| ref:", ref);
+
+    // The @supabase/ssr browser client stores the session in COOKIES, not
+    // localStorage. Any sb-*-auth-token in localStorage is a stale leftover; a
+    // key for a different project ref indicates cross-project contamination.
+    try {
+      const lsKeys = Object.keys(window.localStorage).filter((k) =>
+        /^sb-.*-auth-token/.test(k)
+      );
+      if (lsKeys.length) {
+        console.warn(
+          "[reset-password] stale supabase auth keys in localStorage (ssr client uses cookies):",
+          lsKeys
+        );
+        const foreign = ref ? lsKeys.filter((k) => !k.includes(ref)) : lsKeys;
+        if (foreign.length) {
+          console.error(
+            "[reset-password] localStorage keys from a DIFFERENT project (cross-project!):",
+            foreign
+          );
+        }
+      } else {
+        console.log("[reset-password] no supabase auth keys in localStorage (good)");
+      }
+    } catch {
+      /* localStorage may be unavailable; ignore */
+    }
+
+    const subFromJwt = decodeJwtSub(session.access_token);
+    console.log("[reset-password] JWT sub (user id inside token):", subFromJwt);
+
+    // getUser() validates the token against THIS project's Auth server.
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    if (userErr) {
+      console.error(
+        "[reset-password] getUser error (token's user is not valid for this project):",
+        userErr
+      );
+    }
+    const authUserId = userData?.user?.id ?? null;
+    console.log(
+      "[reset-password] getUser id:",
+      authUserId,
+      "| email:",
+      userData?.user?.email ?? null
+    );
+    console.log(
+      "[reset-password] JWT sub === getUser id:",
+      !!subFromJwt && subFromJwt === authUserId
+    );
+
+    if (userErr || !authUserId) {
+      // The session's user does not exist in this project (stale/cross-project/
+      // deleted). Clear the bad local session so a fresh link starts clean, and
+      // do NOT attempt updateUser (which would 403 with "sub does not exist").
+      await supabase.auth.signOut({ scope: "local" });
+      setError(
+        "This recovery session isn't valid for the current project (the account may have been removed, or the session is stale). Please request a new reset link."
+      );
+      setBusy(false);
+      return;
+    }
+    // -------------------------------------------------------------------------
+
     const { error } = await supabase.auth.updateUser({ password });
     if (error) {
-      // Log the full error object for diagnosis.
       console.error("[reset-password] updateUser error:", error);
       setError(error.message);
       setBusy(false);
