@@ -1,21 +1,12 @@
 import { createBrowserClient } from "@supabase/ssr";
 
+// Standard Supabase SSR browser client. We rely on its default PKCE handling
+// (detectSessionInUrl) rather than overriding it — overriding caused recovery
+// links to fail. The /reset-password page reconciles the auto-exchange with an
+// explicit one and uses "a session now exists" as the success signal.
 export function createClient() {
   return createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      auth: {
-        // PKCE is what the recovery link uses (?code=...).
-        flowType: "pkce",
-        // Do NOT auto-process tokens found in the URL. Otherwise the client
-        // would auto-exchange the recovery `?code=` during init, consuming the
-        // single-use code before our explicit exchange on /reset-password runs,
-        // making every reset link look "invalid". We exchange it ourselves.
-        detectSessionInUrl: false,
-        autoRefreshToken: true,
-        persistSession: true,
-      },
-    }
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
 }

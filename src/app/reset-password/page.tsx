@@ -14,11 +14,14 @@ export default function ResetPasswordPage() {
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
-  // Establish the recovery session by exchanging the PKCE code EXACTLY ONCE.
-  // We do not rely on PASSWORD_RECOVERY auth events, and we never time out
-  // before the exchange resolves — the exchange result alone decides validity.
+  // Establish the recovery session. With the standard client, detectSessionInUrl
+  // may auto-exchange the ?code= during init, so we (a) accept an already-present
+  // session, (b) otherwise exchange the code exactly once, and (c) on any
+  // exchange error, re-check for a session — the auto-exchange may have already
+  // succeeded. We never time out before the exchange resolves, and we do not
+  // rely on PASSWORD_RECOVERY events.
   useEffect(() => {
-    if (startedRef.current) return; // guard React StrictMode's double-invoke
+    if (startedRef.current) return; // exactly once (guards StrictMode double-invoke)
     startedRef.current = true;
 
     let active = true;
@@ -26,32 +29,49 @@ export default function ResetPasswordPage() {
     (async () => {
       const params = new URLSearchParams(window.location.search);
       const errorDescription = params.get("error_description");
-      const code = params.get("code");
-
       if (errorDescription) {
         console.error("[reset-password] link error:", errorDescription);
         if (active) setStatus("invalid");
         return;
       }
+      const code = params.get("code");
 
-      if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (!active) return;
-        if (error) {
-          console.error("[reset-password] exchangeCodeForSession failed:", error.message);
-          setStatus("invalid");
-          return;
-        }
-        // Success: remove the code from the URL and show the form.
+      // (a) A session may already exist if the client auto-exchanged the code.
+      const { data: existing } = await supabase.auth.getSession();
+      if (!active) return;
+      if (existing.session) {
         window.history.replaceState({}, "", "/reset-password");
         setStatus("ready");
         return;
       }
 
-      // No code present — a session may already exist (e.g. after a refresh).
-      const { data } = await supabase.auth.getSession();
+      if (!code) {
+        setStatus("invalid");
+        return;
+      }
+
+      // (b) Exchange the code exactly once.
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
       if (!active) return;
-      setStatus(data.session ? "ready" : "invalid");
+
+      if (error) {
+        // Log the exact error object for diagnosis.
+        console.error("[reset-password] exchangeCodeForSession error:", error);
+        // (c) The auto-exchange may have already consumed the code and created
+        // the session; treat an existing session as success.
+        const { data: after } = await supabase.auth.getSession();
+        if (!active) return;
+        if (after.session) {
+          window.history.replaceState({}, "", "/reset-password");
+          setStatus("ready");
+          return;
+        }
+        setStatus("invalid");
+        return;
+      }
+
+      window.history.replaceState({}, "", "/reset-password");
+      setStatus("ready");
     })();
 
     return () => {
