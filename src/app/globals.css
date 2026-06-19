@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+html, body {
+  background: #14171C;
+  color: #E8E2D2;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* In @layer components so Tailwind utilities (border-amber/40, bg-rust/10, …)
+   applied alongside these classes win the cascade. */
+@layer components {
+  .eyebrow {
+    font-family: var(--font-display), system-ui;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 0.7rem;
+    color: #C9A24B;
+  }
+  .card {
+    background: #1B2027;
+    border: 1px solid #2A323C;
+    border-radius: 0.9rem;
+    box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
