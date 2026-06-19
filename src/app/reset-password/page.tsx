@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -12,53 +12,50 @@ export default function ResetPasswordPage() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const startedRef = useRef(false);
 
-  // Establish the recovery session from whatever the email link delivered.
+  // Establish the recovery session by exchanging the PKCE code EXACTLY ONCE.
+  // We do not rely on PASSWORD_RECOVERY auth events, and we never time out
+  // before the exchange resolves — the exchange result alone decides validity.
   useEffect(() => {
-    let active = true;
+    if (startedRef.current) return; // guard React StrictMode's double-invoke
+    startedRef.current = true;
 
-    // Implicit/hash flow: the browser client auto-detects the recovery token in
-    // the URL hash and fires PASSWORD_RECOVERY (or SIGNED_IN with a session).
-    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!active) return;
-      if (event === "PASSWORD_RECOVERY" || (event === "SIGNED_IN" && session)) {
-        setStatus("ready");
-      }
-    });
+    let active = true;
 
     (async () => {
       const params = new URLSearchParams(window.location.search);
-      if (params.get("error_description")) {
+      const errorDescription = params.get("error_description");
+      const code = params.get("code");
+
+      if (errorDescription) {
+        console.error("[reset-password] link error:", errorDescription);
         if (active) setStatus("invalid");
         return;
       }
-      // PKCE flow: a ?code= must be exchanged for a session.
-      const code = params.get("code");
+
       if (code) {
         const { error } = await supabase.auth.exchangeCodeForSession(code);
         if (!active) return;
         if (error) {
+          console.error("[reset-password] exchangeCodeForSession failed:", error.message);
           setStatus("invalid");
           return;
         }
+        // Success: remove the code from the URL and show the form.
         window.history.replaceState({}, "", "/reset-password");
         setStatus("ready");
         return;
       }
-      // Otherwise check whether a recovery session already exists.
-      const { data } = await supabase.auth.getSession();
-      if (active && data.session) setStatus("ready");
-    })();
 
-    // If no recovery session materializes, the link was bad or expired.
-    const timer = setTimeout(() => {
-      if (active) setStatus((s) => (s === "checking" ? "invalid" : s));
-    }, 2500);
+      // No code present — a session may already exist (e.g. after a refresh).
+      const { data } = await supabase.auth.getSession();
+      if (!active) return;
+      setStatus(data.session ? "ready" : "invalid");
+    })();
 
     return () => {
       active = false;
-      sub.subscription.unsubscribe();
-      clearTimeout(timer);
     };
   }, [supabase]);
 
@@ -79,7 +76,6 @@ export default function ResetPasswordPage() {
       setBusy(false);
       return;
     }
-    // Sign out the recovery session and send them to sign in fresh.
     await supabase.auth.signOut();
     router.replace("/login?reset=success");
   }
