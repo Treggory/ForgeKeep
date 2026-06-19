@@ -13,6 +13,9 @@ export default function ResetPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
+  // Holds the tokens from the recovery session so we can re-attach them to the
+  // client right before updateUser if the in-memory session got lost.
+  const recoveryRef = useRef<{ access_token: string; refresh_token: string } | null>(null);
 
   // Establish the recovery session. With the standard client, detectSessionInUrl
   // may auto-exchange the ?code= during init, so we (a) accept an already-present
@@ -40,6 +43,10 @@ export default function ResetPasswordPage() {
       const { data: existing } = await supabase.auth.getSession();
       if (!active) return;
       if (existing.session) {
+        recoveryRef.current = {
+          access_token: existing.session.access_token,
+          refresh_token: existing.session.refresh_token,
+        };
         window.history.replaceState({}, "", "/reset-password");
         setStatus("ready");
         return;
@@ -51,7 +58,7 @@ export default function ResetPasswordPage() {
       }
 
       // (b) Exchange the code exactly once.
-      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      const { data, error } = await supabase.auth.exchangeCodeForSession(code);
       if (!active) return;
 
       if (error) {
@@ -62,6 +69,10 @@ export default function ResetPasswordPage() {
         const { data: after } = await supabase.auth.getSession();
         if (!active) return;
         if (after.session) {
+          recoveryRef.current = {
+            access_token: after.session.access_token,
+            refresh_token: after.session.refresh_token,
+          };
           window.history.replaceState({}, "", "/reset-password");
           setStatus("ready");
           return;
@@ -70,6 +81,12 @@ export default function ResetPasswordPage() {
         return;
       }
 
+      if (data.session) {
+        recoveryRef.current = {
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        };
+      }
       window.history.replaceState({}, "", "/reset-password");
       setStatus("ready");
     })();
@@ -90,8 +107,33 @@ export default function ResetPasswordPage() {
       return;
     }
     setBusy(true);
+
+    // The 403 on PUT /auth/v1/user happens when updateUser runs without a valid
+    // session bound to this client. Verify an access_token is present; if the
+    // in-memory session was lost, re-attach the recovery tokens via setSession.
+    const { data: sessionData } = await supabase.auth.getSession();
+    let session = sessionData.session;
+
+    if (!session?.access_token && recoveryRef.current) {
+      const { data: setData, error: setErr } = await supabase.auth.setSession(
+        recoveryRef.current
+      );
+      if (setErr) {
+        console.error("[reset-password] setSession error:", setErr);
+      }
+      session = setData?.session ?? null;
+    }
+
+    if (!session?.access_token) {
+      setError("Your recovery session has expired. Please request a new reset link.");
+      setBusy(false);
+      return;
+    }
+
     const { error } = await supabase.auth.updateUser({ password });
     if (error) {
+      // Log the full error object for diagnosis.
+      console.error("[reset-password] updateUser error:", error);
       setError(error.message);
       setBusy(false);
       return;
