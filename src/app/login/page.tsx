@@ -1,5 +1,6 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -11,6 +12,17 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Surface the "password reset" success message after a redirect from
+  // /reset-password (read from the URL to avoid a Suspense boundary).
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("reset") === "success") {
+      setNotice("Your password has been reset. Sign in with your new password.");
+      window.history.replaceState({}, "", "/login");
+    }
+  }, []);
 
   async function submit() {
     setBusy(true);
@@ -48,6 +60,11 @@ export default function LoginPage() {
         <p className="text-sm text-muted">Hobby inventory, in your pocket.</p>
       </div>
       <div className="card space-y-3 p-5">
+        {notice ? (
+          <div className="rounded-lg border border-jade/40 bg-jade/10 p-2.5 text-sm text-jade">
+            {notice}
+          </div>
+        ) : null}
         {msg ? (
           <div className="rounded-lg border border-line bg-gun p-2.5 text-sm text-amber">
             {msg}
@@ -80,6 +97,16 @@ export default function LoginPage() {
         >
           {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
         </button>
+        {mode === "signin" ? (
+          <div className="text-center">
+            <Link
+              href="/forgot-password"
+              className="text-sm text-muted underline-offset-2 hover:underline"
+            >
+              Forgot password?
+            </Link>
+          </div>
+        ) : null}
         <button
           onClick={() => {
             setMode(mode === "signin" ? "signup" : "signin");

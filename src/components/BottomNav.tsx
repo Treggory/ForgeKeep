@@ -12,7 +12,12 @@ const tabs = [
 
 export default function BottomNav() {
   const path = usePathname();
-  if (path.startsWith("/login")) return null;
+  if (
+    path.startsWith("/login") ||
+    path.startsWith("/forgot-password") ||
+    path.startsWith("/reset-password")
+  )
+    return null;
   const active = (href: string) =>
     href === "/" ? path === "/" : path.startsWith(href);
 

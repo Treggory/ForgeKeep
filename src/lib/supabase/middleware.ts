@@ -12,7 +12,13 @@ export async function updateSession(request: NextRequest) {
         getAll() {
           return request.cookies.getAll();
         },
-        setAll(cookiesToSet: { name: string; value: string; options?: any }[]) {
+        setAll(
+  cookiesToSet: {
+    name: string;
+    value: string;
+    options?: Record<string, unknown>;
+  }[]
+) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value)
           );
@@ -32,14 +38,21 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
-  const isAuthRoute = path.startsWith("/login");
+  // Public routes: the sign-in page and the password-recovery flow. The
+  // recovery token arrives in the URL (hash or ?code=) and is processed
+  // client-side, so these must not be gated — otherwise the link would be
+  // redirected to /login before the page can read the token.
+  const PUBLIC = ["/login", "/forgot-password", "/reset-password", "/auth"];
+  const isPublic = PUBLIC.some((p) => path === p || path.startsWith(p + "/"));
 
-  if (!user && !isAuthRoute) {
+  if (!user && !isPublic) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
   }
-  if (user && isAuthRoute) {
+  // Only bounce a signed-in user off the sign-in page itself — never off the
+  // reset page, where a (recovery) session is expected.
+  if (user && path === "/login") {
     const url = request.nextUrl.clone();
     url.pathname = "/";
     return NextResponse.redirect(url);
